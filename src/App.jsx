@@ -16,7 +16,8 @@ const ThreeDViewer = ({ width, height, imageUrl }) => {
 
   useEffect(() => {
     let reqId;
-    let renderer, scene, camera;
+    let renderer, scene, camera, controls;
+    let mounted = true;
 
     const initThree = () => {
       const THREE = window.THREE;
@@ -60,48 +61,26 @@ const ThreeDViewer = ({ width, height, imageUrl }) => {
       const base = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), baseMat);
       totem.add(base);
 
-      sceneRefs.current = { scene, camera, renderer, totem, cabinet, screen, base, screenMat };
+      // --- INICIALIZAR ORBIT CONTROLS (Zoom, Pan, Rotate) ---
+      controls = new THREE.OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true; // Movimento com inércia/suavidade
+      controls.dampingFactor = 0.05;
+      controls.enableZoom = true;
+      controls.enablePan = true;
+      controls.autoRotateSpeed = 2.0;
+
+      sceneRefs.current = { scene, camera, renderer, totem, cabinet, screen, base, screenMat, controls, hasSetInitialPos: false };
       setIsLoaded(true);
-
-      let isDragging = false;
-      let previousMousePosition = { x: 0, y: 0 };
-      let rotationY = -Math.PI / 8;
-      let rotationX = 0;
-
-      const handleStart = (clientX, clientY) => {
-        isDragging = true;
-        previousMousePosition = { x: clientX, y: clientY };
-      };
-
-      const handleMove = (clientX, clientY) => {
-        if (isDragging && totem) {
-          const deltaX = clientX - previousMousePosition.x;
-          const deltaY = clientY - previousMousePosition.y;
-          rotationY += deltaX * 0.01;
-          rotationX += deltaY * 0.01;
-          rotationX = Math.max(-Math.PI / 4, Math.min(Math.PI / 4, rotationX));
-          previousMousePosition = { x: clientX, y: clientY };
-        }
-      };
-
-      const handleEnd = () => { isDragging = false; };
-
-      const canvas = renderer.domElement;
-      canvas.addEventListener('mousedown', (e) => handleStart(e.clientX, e.clientY));
-      canvas.addEventListener('mousemove', (e) => handleMove(e.clientX, e.clientY));
-      canvas.addEventListener('mouseup', handleEnd);
-      canvas.addEventListener('mouseleave', handleEnd);
-      
-      canvas.addEventListener('touchstart', (e) => handleStart(e.touches[0].clientX, e.touches[0].clientY));
-      canvas.addEventListener('touchmove', (e) => handleMove(e.touches[0].clientX, e.touches[0].clientY));
-      canvas.addEventListener('touchend', handleEnd);
 
       const animate = () => {
         reqId = requestAnimationFrame(animate);
-        if (!isDragging && isRotatingRef.current) rotationY += 0.005;
         
-        totem.rotation.y += (rotationY - totem.rotation.y) * 0.1;
-        totem.rotation.x += (rotationX - totem.rotation.x) * 0.1;
+        if (controls) {
+            // O OrbitControls lida automaticamente com a rotação contínua e interrompe 
+            // graciosamente quando o utilizador está a interagir com o rato.
+            controls.autoRotate = isRotatingRef.current;
+            controls.update(); // Necessário chamar sempre quando o damping ou autoRotate estão ativos
+        }
         
         renderer.render(scene, camera);
       };
@@ -120,24 +99,41 @@ const ThreeDViewer = ({ width, height, imageUrl }) => {
       return () => window.removeEventListener('resize', handleResize);
     };
 
-    if (window.THREE) {
-      initThree();
-    } else {
-      const script = document.createElement('script');
-      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
-      script.onload = initThree;
-      document.head.appendChild(script);
-    }
+    // Carregar o Three.js e em seguida o plugin oficial OrbitControls
+    const loadDependencies = async () => {
+      if (!window.THREE) {
+        await new Promise((resolve) => {
+          const script = document.createElement('script');
+          script.src = 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
+          script.onload = resolve;
+          document.head.appendChild(script);
+        });
+      }
+      if (!window.THREE.OrbitControls) {
+        await new Promise((resolve) => {
+          const script = document.createElement('script');
+          script.src = 'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js';
+          script.onload = resolve;
+          document.head.appendChild(script);
+        });
+      }
+      if (mounted) initThree();
+    };
+
+    loadDependencies();
 
     return () => {
+      mounted = false;
       cancelAnimationFrame(reqId);
       if (mountRef.current && renderer) mountRef.current.removeChild(renderer.domElement);
+      if (controls) controls.dispose();
     };
   }, []);
 
+  // Efeito 2: Atualizar escalas dimensionais
   useEffect(() => {
     if (!isLoaded || !sceneRefs.current.cabinet) return;
-    const { totem, cabinet, screen, base, camera } = sceneRefs.current;
+    const { totem, cabinet, screen, base, camera, controls } = sceneRefs.current;
     
     const w = width / 100;
     const h = height / 100;
@@ -151,10 +147,27 @@ const ThreeDViewer = ({ width, height, imageUrl }) => {
     totem.position.y = 0;
 
     const maxDim = Math.max(w, h);
-    camera.position.z = maxDim * 1.5 + 1.2;
-    camera.position.y = maxDim * 0.2;
+    const distance = maxDim * 1.5 + 1.2;
+
+    // Configurar a câmara mantendo o ângulo em que o utilizador a tiver deixado
+    if (!sceneRefs.current.hasSetInitialPos) {
+      // Posição inicial (ligeiramente de lado)
+      camera.position.set(Math.sin(Math.PI / 8) * distance, maxDim * 0.2, Math.cos(Math.PI / 8) * distance);
+      sceneRefs.current.hasSetInitialPos = true;
+    } else {
+      // Ajustar a distância (zoom) para a nova escala, sem alterar o ângulo de órbita
+      const offset = camera.position.clone().sub(controls.target);
+      if (offset.lengthSq() > 0.001) {
+        offset.normalize().multiplyScalar(distance);
+        camera.position.copy(controls.target).add(offset);
+      }
+    }
+    
+    if (controls) controls.update();
+
   }, [width, height, isLoaded]);
 
+  // Efeito 3: Texturização da Imagem
   useEffect(() => {
     if (!isLoaded || !sceneRefs.current.screenMat) return;
     const THREE = window.THREE;
@@ -185,7 +198,7 @@ const ThreeDViewer = ({ width, height, imageUrl }) => {
       {isLoaded && (
         <>
           <div className="absolute top-4 left-4 bg-slate-900/80 px-3 py-1.5 rounded-lg text-xs font-medium text-emerald-400 pointer-events-none backdrop-blur-sm flex items-center gap-2 border border-slate-700 z-10">
-            <Box className="w-4 h-4" /> Arraste para inspecionar
+            <Box className="w-4 h-4" /> 3D: Girar, Zoom e Mover
           </div>
           <div className="absolute top-4 right-4 z-10">
             <button
